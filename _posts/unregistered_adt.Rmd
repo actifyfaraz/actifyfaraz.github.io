@@ -1,0 +1,278 @@
+---
+title: "Average Daily Transactions - Unregistered"
+author: "Actify Data Labs"
+date: "5/8/2019"
+output:
+  html_document:
+    code_folding: hide
+    theme: readable
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+      toc_depth: 4
+  word_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("/Users/actify/Documents/Projects/Starbucks/utils.R")
+
+query <- "select  
+customerid, 
+customername, 
+card_number,  
+transaction_id, 
+bill_number, 
+to_date(transaction_time__dd_mm_yyyy_hh_mm_ss_ , 'DD/MM/YYYY') as transaction_date, 
+transaction_type,  
+storename, 
+cast(transaction_amount__inr_ as float) as transaction_amount 
+from 
+transaction_details_sftp.transaction_details_sftp
+where to_date(transaction_time__dd_mm_yyyy_hh_mm_ss_ , 'DD/MM/YYYY') between '2019-04-01' and '2019-09-30' and transaction_type = 'Prepaid Redeem' 
+and tier_name is null"
+
+unregistered_transactions_data <- as.data.table(extract_from_db(query))
+
+# Adding month, year and month_year to the data 
+unregistered_transactions_data[, `:=`(month_of_transaction = months(transaction_date), 
+                                         year_of_transaction = year(transaction_date), 
+                                         mo_year = zoo::as.yearmon(paste0(months(transaction_date),"-",year(transaction_date)), "%B-%Y"))]
+
+```
+
+#Calculation of Average Daily Transaction - Methodology  
+<br>
+
+## Method - 1 
+<br>
+To get the unregistered transactions, we will be considering only those transactions for which no tier name is present in the Pinelabs transaction detail report. This ensures that we consider the transactions which came under the domain "unregistered" at that time, even though those members may have registered later. 
+
+A glimpse of the data is given below:
+
+```{r}
+DT::datatable(head(unregistered_transactions_data[, .(customerid, customername, transaction_id, transaction_amount)]), 
+              caption = htmltools::tags$caption(
+    style = 'caption-side: bottom; text-align: center;',
+    'Table 1: ', htmltools::em('Unregistered Transaction Data')
+  ))
+```
+  
+  
+
+
+### Daily ADT
+
+To take into account, the actual number of days a particular store stays open, we will consider the  transactions averaged by number of stores on a daily basis, as shown below for the month of April 2019. 
+
+
+
+```{r}
+adt_daily <- unregistered_transactions_data[mo_year == 'Apr 2019', 
+                                            .(daily_transactions = uniqueN(transaction_id),
+                                              stores_open = uniqueN(storename),
+                                              adt_daily = uniqueN(transaction_id) / uniqueN(storename)), 
+                                            by = .(transaction_date)][order(transaction_date)]
+
+
+adt_daily[, adt_daily:= round(adt_daily, 2)]
+DT::datatable(adt_daily, 
+              caption = htmltools::tags$caption(
+    style = 'caption-side: bottom; text-align: center;',
+    'Table 2: ', htmltools::em('Daily ADT')
+  ))
+```
+
+
+### Monthly ADT
+
+To get the final ADT for a month, we take the average of the ADT values calculated on a daily basis for that particular month. The same is shown below for the month of April 2019. 
+
+```{r}
+adt_daily[, .(month = 'Apr 2019', ADT = round(mean(adt_daily),2))]
+```
+
+<br>
+Using the above logic, ADT for the months Oct 2018 to Apr 2019 is given below:
+
+```{r}
+monthwise_ADT_unreg <- unregistered_transactions_data[, .(adt_daily = uniqueN(transaction_id) / uniqueN(storename)), 
+                               by = .(transaction_date, mo_year)][,
+                                                                  .(ADT = mean(adt_daily)),
+                                                                  by = .(mo_year)][order(mo_year)]
+
+monthwise_ADT_unreg[, `:=`(month_year = as.character(mo_year), ADT = round(ADT,2))]
+DT::datatable(monthwise_ADT_unreg[, .(month_year, ADT)], caption = htmltools::tags$caption(
+    style = 'caption-side: bottom; text-align: center;',
+    'Table 3: ', htmltools::em('Monthly ADT')
+  ))
+
+
+
+
+```
+
+
+
+```{r include=FALSE, message = F, cache=T}
+query <- "select  customerid, 
+customername,
+card_number,  
+transaction_id,
+bill_number,
+to_date(transaction_time__dd_mm_yyyy_hh_mm_ss_ , 'DD/MM/YYYY') as transaction_date, 
+transaction_type,  
+storename,
+cast(transaction_amount__inr_ as float) as transaction_amount
+from 
+transaction_details_sftp.transaction_details_sftp
+where (to_date(transaction_time__dd_mm_yyyy_hh_mm_ss_, 'DD/MM/YYYY') between '2019-04-01' and '2019-08-31')  and 
+transaction_type = 'Prepaid Redeem'"
+
+# Getting combined transactions 
+unregistered_plus_registered_data <- as.data.table(extract_from_db(query))
+
+
+# Adding month, year and month_year to the data 
+
+unregistered_plus_registered_data[, `:=`(month_of_transaction = months(transaction_date), 
+                                         year_of_transaction = year(transaction_date), 
+                                         mo_year = zoo::as.yearmon(paste0(months(transaction_date),"-",year(transaction_date)), "%B-%Y"))]
+
+```
+
+
+
+Getting the number of transactions - total and registered
+
+
+```{r}
+total_msr_txns = unregistered_plus_registered_data[, .(total_txns = uniqueN(transaction_id)), 
+                                                   by = .(transaction_date, storename, mo_year)][order(storename, transaction_date)]
+
+total_registered_txns = pl_data[,.(total_registered_txns = uniqueN(transaction_id)), 
+                                by = .(transaction_date, storename, mo_year)][order(storename, transaction_date)]
+
+txns = total_registered_txns[total_msr_txns, on = .(transaction_date, storename, mo_year)]
+
+txns[is.na(total_registered_txns), total_registered_txns:= 0]
+
+
+adt <- txns[mo_year != 'Sep 2019', .(adt_daily_total = sum(total_txns) / uniqueN(storename), 
+         adt_daily_reg = sum(total_registered_txns) / uniqueN(storename), 
+         adt_daily_unreg = sum(unregistered_txns) / uniqueN(storename)), 
+     by = .(transaction_date, mo_year)][, .(adt_total = mean(adt_daily_total), 
+                                            adt_registered = mean(adt_daily_reg), 
+                                            adt_unregistered = mean(adt_daily_unreg))
+                                        ]
+
+write.xlsx(adt, "./data/adt_overall.xlsx")
+```
+
+
+```{r}
+txns[, unregistered_txns := total_txns - total_registered_txns]
+```
+
+
+
+
+
+
+```{r total MSR ADT}
+total_msr_adt <- unregistered_plus_registered_data[, .(adt_daily = uniqueN(transaction_id) / uniqueN(storename)), 
+                                                   by = .(transaction_date, mo_year)][
+                                                           , .(adt = mean(adt_daily)), 
+                                                           by = .(mo_year)]
+
+```
+
+```{r registered ADT}
+pl_data <- get_pl_data(from_date = ymd(20190401),to_date = ymd(20190930))
+
+registered_adt = pl_data[,.(adt_daily = uniqueN(transaction_id) / uniqueN(storename)), 
+                          by = .(transaction_date, mo_year)][
+                                  , .(registered_adt = mean(adt_daily)), 
+                                  by = .(mo_year)
+                          ]
+
+
+```
+
+
+## Method - 2
+
+Here we take the unregistered transactions as those for which the customerid is NOT present in the customer enrollment data 
+
+```{r message=FALSE, include = F, cache=T}
+# Reading the customer enrollment data 
+query <- "select distinct customerid from customer_enrollment_sftp.customerenrollment_sftp"
+registered_customer_ids <- unique(as.data.table(extract_from_db(query))[, customerid])
+
+
+# getting the unregistered transactions
+unregistered_transactions_data <- unregistered_plus_registered_data[!(customerid %in% registered_customer_ids)]
+
+```
+
+### Daily ADT
+
+Here also, just like in Method-1,  we will consider the  transactions averaged by number of stores on a daily basis, as shown below for the month of April 2019. 
+
+
+```{r}
+# calculating ADT on a daily basis  
+adt_daily <- unregistered_transactions_data[mo_year == 'Apr 2019', 
+                                            .(daily_transactions = uniqueN(transaction_id),
+                                              stores_open = uniqueN(storename), 
+                                              adt_daily =  uniqueN(transaction_id) / uniqueN(storename)),
+                                            by = .(transaction_date)][order(transaction_date)]
+                              
+
+adt_daily[, adt_daily:= round(adt_daily, 2)]
+
+
+DT::datatable(adt_daily, 
+              caption = htmltools::tags$caption(
+    style = 'caption-side: bottom; text-align: center;',
+    'Table 4: ', htmltools::em('Daily ADT')
+  ))
+
+
+```
+
+### Monthly ADT
+
+To get the final ADT for a month, we take the average of the ADT values calculated on a daily basis for that particular month. The same is shown below for the month of April 2019. 
+
+```{r}
+adt_daily[, .(month = 'Apr 2019', ADT = round(mean(adt_daily),2))]
+```
+
+<br>
+Using the above logic, ADT for the months Oct 2018 to Apr 2019 is given below:
+
+```{r}
+monthwise_ADT <- unregistered_transactions_data[, .(adt_daily = uniqueN(transaction_id) / uniqueN(storename)), 
+                               by = .(transaction_date, mo_year)][,
+                                                                  .(ADT = mean(adt_daily)),
+                                                                  by = .(mo_year)][order(mo_year)]
+
+monthwise_ADT[, `:=`(month_year = as.character(mo_year), ADT = round(ADT,2))]
+DT::datatable(monthwise_ADT[, .(month_year, ADT)], caption = htmltools::tags$caption(
+    style = 'caption-side: bottom; text-align: center;',
+    'Table 5: ', htmltools::em('Monthly ADT')
+  ))
+
+```
+
+
+
+
+
+
+
+
+
